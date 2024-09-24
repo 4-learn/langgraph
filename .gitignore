@@ -1,0 +1,95 @@
+# Python 字節編譯文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C 擴展
+*.so
+
+# 分發/打包
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# 安裝程序日誌
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 單元測試/覆蓋率報告
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath 解析文件
+*.sage.py
+
+# 環境
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder 專案設置
+.spyderproject
+.spyproject
+
+# Rope 專案設置
+.ropeproject
+
+# mkdocs 文檔
+/site
+
+# mypy
+.mypy_cache/
+
+# IDE 相關
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 作業系統相關
+.DS_Store
+Thumbs.db
+
+# 專案特定
+secrets/
+config.ini
+*.log
