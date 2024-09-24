@@ -1,0 +1,8 @@
+openai
+langchain
+langchain_community
+langgraph
+langchain_anthropic
+langchain_openai
+gspread 
+google-auth-oauthlib
