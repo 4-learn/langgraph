@@ -1,30 +1,21 @@
 import json
 import requests
-from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, START, END
-from typing_extensions import TypedDict
-from langchain_core.messages import AIMessage, HumanMessage
 from datetime import datetime, timezone
 import gspread
 from google.oauth2.service_account import Credentials
 from langchain.tools import tool
 
-class State(TypedDict):
-    messages: list
-    stop: bool
-    can_activate: bool
-    target_device: str
+# 全局變量
+devices = None
 
 def read_google_sheet():
     scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-    creds = Credentials.from_service_account_file('secrets/t-planet.json', scopes=scopes)
+    creds = Credentials.from_service_account_file('agents/智慧管家/secrets/t-planet.json', scopes=scopes)
     client = gspread.authorize(creds)
     sheet_url = "https://docs.google.com/spreadsheets/d/1uSp6WKTuEUufVm1nS8L-HWMsaeDEDyeanLPBm8J5TCY/edit?usp=sharing"
     sheet = client.open_by_url(sheet_url).get_worksheet(0)
     records = sheet.get_all_records()
     return {row['設備']: row for row in records}
-
-devices = read_google_sheet()
 
 def api_call(device_id, path, method='GET'):
     base_url = "https://e2live.duckdns.org:8155/api"
@@ -35,24 +26,68 @@ def api_call(device_id, path, method='GET'):
     try:
         response = requests.request(method, url, headers=headers)
         response.raise_for_status()
-        return {"status": "success", "data": response.json() if response.content else None, "status_code": response.status_code}
+        if response.content:
+            return {"status": "success", "data": response.json(), "status_code": response.status_code}
+        else:
+            return {"status": "success", "data": None, "status_code": response.status_code}
     except requests.exceptions.RequestException as e:
         return {"status": "error", "message": str(e), "status_code": getattr(e.response, 'status_code', None)}
 
-def check_device_status(state: State):
-    target_device = state['target_device']
+@tool
+def manage_device(target_device: str) -> str:
+    """管理指定的設備，檢查設備狀態，分析是否可以啟動，並嘗試啟動設備。
+
+    Args:
+        target_device (str): 要管理的設備名稱，例如 "開啟會議室除濕機" 或 "關閉會議室冷氣"
+
+    Returns:
+        str: 包含設備狀態、分析結果和操作結果的詳細報告
+    """
+    global devices
+    devices = read_google_sheet()
+
+    print(f"原始輸入: {target_device}")
+
+    # 嘗試解析可能的 JSON 輸入
+    try:
+        input_data = json.loads(target_device)
+        if isinstance(input_data, dict) and 'message' in input_data:
+            target_device = input_data['message']
+    except json.JSONDecodeError:
+        pass  # 如果不是 JSON，就使用原始輸入
+
+    # 處理目標設備名稱
+    target_device = target_device.strip()
+    
+    # 直接匹配完整的設備名稱
+    if target_device in devices:
+        print(f"精確匹配到設備: {target_device}")
+    else:
+        # 如果沒有精確匹配，嘗試部分匹配
+        possible_devices = [device for device in devices.keys() if device.lower() in target_device.lower()]
+        if possible_devices:
+            target_device = max(possible_devices, key=len)  # 選擇最長的匹配
+            print(f"部分匹配到設備: {target_device}")
+        else:
+            return f"錯誤：找不到設備 '{target_device}'。可用的設備包括: {', '.join(devices.keys())}"
+
     device_info = devices[target_device]
     related_devices = device_info['related_devices'].split(';') if device_info['related_devices'] else []
 
-    try:
-        statuses = []
-        for related_device in related_devices:
-            related_device_info = devices[related_device]
-            status_response = api_call(related_device_info['deviceID'], related_device_info['path'])
-            
-            device_state = status_response.get('data', {}).get('state', '').lower()
-            device_name = status_response.get('data', {}).get('attributes', {}).get('friendly_name', related_device)
-            last_updated = status_response.get('data', {}).get('last_updated')
+    # 檢查設備狀態
+    all_devices_ok = True
+    messages = []
+    for related_device_id in related_devices:
+        print(f"檢查相關設備: {related_device_id}")
+        status_response = api_call(related_device_id, 'states')
+        
+        print(f"相關設備 '{related_device_id}' 的狀態回應: {status_response}")
+
+        if status_response['status'] == 'success':
+            device_data = status_response.get('data', {})
+            device_state = device_data.get('state', '').lower()
+            device_name = device_data.get('attributes', {}).get('friendly_name', related_device_id)
+            last_updated = device_data.get('last_updated')
 
             is_online = device_state in ['on', 'off']
             is_recent = True
@@ -60,85 +95,45 @@ def check_device_status(state: State):
                 last_updated_time = datetime.fromisoformat(last_updated)
                 is_recent = (datetime.now(timezone.utc) - last_updated_time).total_seconds() < 300
 
-            statuses.append(is_online and is_recent and device_state == 'on')
-            state["messages"].append(AIMessage(content=json.dumps({
-                "status": is_online and is_recent,
-                "Message": f"設備 '{device_name}' 狀態: {'開啟' if device_state == 'on' else '關閉'}, " +
-                           f"{'在線' if is_online else '離線'}, " +
-                           f"最後更新: {'最近' if is_recent else '不是最近'}"
-            })))
+            device_ok = is_online and is_recent
+            if not device_ok:
+                all_devices_ok = False
 
-        state["can_activate"] = all(statuses)
-        message = f"{'所有' if state['can_activate'] else '部分'}關聯設備已開啟並在線，{target_device}{'可以' if state['can_activate'] else '無法'}安全啟動"
-        state["messages"].append(AIMessage(content=json.dumps({"status": state["can_activate"], "Message": message})))
-    except Exception as e:
-        state["can_activate"] = False
-        state["messages"].append(AIMessage(content=json.dumps({
-            "status": False,
-            "Message": f"檢查設備狀態時發生錯誤: {str(e)}"
-        })))
-    return state
-
-def activate_device(state: State):
-    target_device = state['target_device']
-    device_info = devices[target_device]
-    if state["can_activate"]:
-        try:
-            api_call(device_info['deviceID'], device_info['path'], method='POST')
-            message = f"正在啟動 {target_device}"
-            status = True
-        except Exception as e:
-            message = f"啟動 {target_device} 時發生錯誤: {str(e)}"
-            status = False
-    else:
-        message = f"由於依賴的設備未開啟，{target_device} 未被啟動"
-        status = False
-    
-    state["messages"].append(AIMessage(content=json.dumps({"status": status, "Message": message})))
-    state["stop"] = True
-    return state
-
-def chatbot(state: State):
-    llm = ChatOpenAI(model="gpt-4")
-    processed_messages = [AIMessage(content=json.loads(msg.content)["Message"]) if isinstance(msg, AIMessage) else msg for msg in state["messages"]]
-    if not processed_messages:
-        processed_messages = [HumanMessage(content=f"請檢查 {state['target_device']} 的關聯設備狀態")]
-    
-    response = llm.invoke(processed_messages)
-    response_content = response.content if hasattr(response, 'content') else str(response)
-    status = "error" not in response_content.lower() and "錯誤" not in response_content
-    state["messages"].append(AIMessage(content=json.dumps({"status": status, "Message": response_content})))
-    return state
-
-def format_line_response(result):
-    summary = []
-    for message in result["messages"]:
-        content = json.loads(message.content)
-        if not content["status"]:
-            summary.append(f"錯誤: {content['Message']}")
-        elif "狀態:" in content["Message"]:
-            summary.append(content["Message"])
+            status_msg = f"設備 '{device_name}' (ID: {related_device_id}) 狀態: {'開啟' if device_state == 'on' else '關閉'}, " \
+                         f"{'在線' if is_online else '離線'}, " \
+                         f"最後更新: {'最近' if is_recent else '不是最近'}"
+            messages.append(status_msg)
+            print(status_msg)
         else:
-            summary.append(f"分析: {content['Message'][:100]}...")
+            error_msg = f"錯誤: 無法獲取設備 '{related_device_id}' 的狀態: {status_response.get('message', '未知錯誤')}"
+            messages.append(error_msg)
+            print(error_msg)
+            all_devices_ok = False
 
-    final_status = "可以啟動" if result["can_activate"] else "無法啟動"
-    response = f"設備：{result['target_device']}\n狀態：{final_status}\n\n"
-    response += "詳細信息：\n" + "\n".join(summary)
+    can_activate = all_devices_ok
+    status_summary = f"{'所有' if can_activate else '部分'}關聯設備狀態正常，{target_device}{'可以' if can_activate else '無法'}安全執行"
+    messages.append(status_summary)
+    print(status_summary)
+
+    # 執行設備操作
+    if can_activate:
+        try:
+            operation_response = api_call(device_info['deviceID'], device_info['path'], method='POST')
+            print(f"設備操作的 API 回應: {operation_response}")
+            if operation_response['status'] == 'success':
+                operation_message = f"成功執行操作: {target_device}"
+            else:
+                operation_message = f"執行操作 {target_device} 時發生錯誤: {operation_response.get('message', '未知錯誤')}"
+        except Exception as e:
+            operation_message = f"執行操作 {target_device} 時發生異常: {str(e)}"
+    else:
+        operation_message = f"由於部分相關設備狀態異常，未執行 {target_device} 的操作"
+
+    messages.append(operation_message)
+    print(operation_message)
+
+    # 格式化回應
+    response = f"設備：{target_device}\n狀態：{'可以執行' if can_activate else '無法執行'}\n\n"
+    response += "詳細信息：\n" + "\n".join(messages)
+
     return response
-
-@tool
-def manage_device(target_device: str) -> str:
-    """管理指定的設備，檢查設備狀態，分析是否可以啟動，並嘗試啟動設備。"""
-    graph_builder = StateGraph(State)
-    graph_builder.add_node("check_status", check_device_status)
-    graph_builder.add_node("activate_device", activate_device)
-    graph_builder.add_node("chatbot", chatbot)
-    graph_builder.add_edge(START, "check_status")
-    graph_builder.add_edge("check_status", "chatbot")
-    graph_builder.add_edge("chatbot", "activate_device")
-    graph_builder.add_edge("activate_device", END)
-    graph = graph_builder.compile()
-
-    initial_state = {"messages": [], "stop": False, "can_activate": False, "target_device": target_device}
-    result = graph.invoke(initial_state)
-    return format_line_response(result)
