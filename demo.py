@@ -1,37 +1,39 @@
 import json
-import requests
 from datetime import datetime, timezone
-import gspread
-from google.oauth2.service_account import Credentials
 from langchain.tools import tool
 
-# 全局變量
-devices = None
-
-def read_google_sheet():
-    scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-    creds = Credentials.from_service_account_file('agents/智慧管家/secrets/t-planet.json', scopes=scopes)
-    client = gspread.authorize(creds)
-    sheet_url = "https://docs.google.com/spreadsheets/d/1uSp6WKTuEUufVm1nS8L-HWMsaeDEDyeanLPBm8J5TCY/edit?usp=sharing"
-    sheet = client.open_by_url(sheet_url).get_worksheet(0)
-    records = sheet.get_all_records()
-    return {row['設備']: row for row in records}
-
-def api_call(device_id, path, method='GET'):
-    base_url = "https://e2live.duckdns.org:8155/api"
-    headers = {
-        "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI2Mjk0NmMzNjI2Nzc0YzJkOTkxZWFjYjk1NjkxZjgzZCIsImlhdCI6MTcxODc2Mzg5NywiZXhwIjoyMDM0MTIzODk3fQ.gq-oyg7bog6-1l8UW7QSiqTnQXzxrs0WbbE5qwIMaxI"
+# 模擬設備資料
+def load_mock_device_data():
+    return {
+        "開啟會議室冷氣": {
+            "deviceID": "mock-device-123",
+            "path": "control/ac",
+            "related_devices": "mock-device-456;mock-device-789"
+        },
+        "mock-device-456": {
+            "deviceID": "mock-device-456",
+            "path": "control/fan",
+            "related_devices": ""
+        },
+        "mock-device-789": {
+            "deviceID": "mock-device-789",
+            "path": "control/lights",
+            "related_devices": ""
+        }
     }
-    url = f"{base_url}/{path}/{device_id}"
-    try:
-        response = requests.request(method, url, headers=headers)
-        response.raise_for_status()
-        if response.content:
-            return {"status": "success", "data": response.json(), "status_code": response.status_code}
-        else:
-            return {"status": "success", "data": None, "status_code": response.status_code}
-    except requests.exceptions.RequestException as e:
-        return {"status": "error", "message": str(e), "status_code": getattr(e.response, 'status_code', None)}
+
+devices = load_mock_device_data()
+
+# 模擬 API 呼叫
+def mock_api_call(device_id, path, method='GET'):
+    mock_response = {
+        "deviceID": device_id,
+        "path": path,
+        "state": "on" if device_id == "mock-device-456" else "off",
+        "attributes": {"friendly_name": f"設備 {device_id}"},
+        "last_updated": datetime.now(timezone.utc).isoformat()
+    }
+    return {"status": "success", "data": mock_response, "status_code": 200}
 
 @tool
 def manage_device(target_device: str) -> str:
@@ -43,9 +45,6 @@ def manage_device(target_device: str) -> str:
     Returns:
         str: 包含設備狀態、分析結果和操作結果的詳細報告
     """
-    global devices
-    devices = read_google_sheet()
-
     print(f"原始輸入: {target_device}")
 
     # 嘗試解析可能的 JSON 輸入
@@ -56,14 +55,13 @@ def manage_device(target_device: str) -> str:
     except json.JSONDecodeError:
         pass  # 如果不是 JSON，就使用原始輸入
 
-    # 處理目標設備名稱
     target_device = target_device.strip()
-    
+
     # 直接匹配完整的設備名稱
     if target_device in devices:
         print(f"精確匹配到設備: {target_device}")
     else:
-        # 如果沒有精確匹配，嘗試部分匹配
+        # 部分匹配
         possible_devices = [device for device in devices.keys() if device.lower() in target_device.lower()]
         if possible_devices:
             target_device = max(possible_devices, key=len)  # 選擇最長的匹配
@@ -79,8 +77,7 @@ def manage_device(target_device: str) -> str:
     messages = []
     for related_device_id in related_devices:
         print(f"檢查相關設備: {related_device_id}")
-        status_response = api_call(related_device_id, 'states')
-        
+        status_response = mock_api_call(related_device_id, 'states')
         print(f"相關設備 '{related_device_id}' 的狀態回應: {status_response}")
 
         if status_response['status'] == 'success':
@@ -118,7 +115,7 @@ def manage_device(target_device: str) -> str:
     # 執行設備操作
     if can_activate:
         try:
-            operation_response = api_call(device_info['deviceID'], device_info['path'], method='POST')
+            operation_response = mock_api_call(device_info['deviceID'], device_info['path'], method='POST')
             print(f"設備操作的 API 回應: {operation_response}")
             if operation_response['status'] == 'success':
                 operation_message = f"成功執行操作: {target_device}"
